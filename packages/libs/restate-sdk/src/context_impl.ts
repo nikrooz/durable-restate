@@ -76,7 +76,6 @@ import {
   RestateInvocationPromise,
   RestatePendingPromise,
   RestateSinglePromise,
-  RestateTaskPromise,
 } from "./promises.js";
 import { InputPump, OutputPump } from "./io.js";
 
@@ -806,49 +805,6 @@ function unpackRunParameters<T>(
     throw new TypeError("unexpected a function as a second parameter.");
   }
   return { action: a };
-}
-
-export function createTaskBridgePromise<T>(
-  ctx: ContextImpl,
-  action: () => T
-): RestatePromise<Awaited<T>> {
-  let result: T;
-  try {
-    result = action();
-  } catch (e) {
-    return new RestateTaskPromise<Awaited<T>>(
-      ctx,
-      Promise.reject(ensureError(e))
-    );
-  }
-
-  if (isObjectLike(result)) {
-    const resultContext = extractContext(result);
-    if (resultContext !== undefined) {
-      if (resultContext !== ctx) {
-        ctx.handleInvocationEndError(
-          new Error(
-            "You're mixing up RestatePromises from different RestateContext. This is not supported."
-          )
-        );
-        return new RestatePendingPromise(ctx);
-      }
-      return result as unknown as RestatePromise<Awaited<T>>;
-    }
-  }
-
-  return new RestateTaskPromise<Awaited<T>>(
-    ctx,
-    result as PromiseLike<Awaited<T>> | Awaited<T>
-  );
-}
-
-function isObjectLike(
-  value: unknown
-): value is Record<PropertyKey, unknown> | ((...args: unknown[]) => unknown) {
-  return (
-    (typeof value === "object" && value !== null) || typeof value === "function"
-  );
 }
 
 class DurablePromiseImpl<T> implements DurablePromise<T> {

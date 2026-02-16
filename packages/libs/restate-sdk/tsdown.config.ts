@@ -1,7 +1,13 @@
 import { defineConfig } from "tsdown";
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/node.ts", "src/fetch.ts", "src/lambda.ts"],
+  entry: [
+    "src/index.ts",
+    "src/node.ts",
+    "src/fetch.ts",
+    "src/lambda.ts",
+    "src/internal.ts",
+  ],
   platform: "neutral",
   exports: true,
   format: ["esm", "cjs"],

@@ -153,6 +153,27 @@ abstract class AbstractRestatePromise<T> implements InternalRestatePromise<T> {
   abstract [Symbol.toStringTag]: string;
 }
 
+export class RestateTaskPromise<T> extends AbstractRestatePromise<T> {
+  private readonly taskPromise: Promise<T>;
+
+  constructor(ctx: ContextImpl, taskPromise: PromiseLike<T> | T) {
+    super(ctx);
+    this.taskPromise = Promise.resolve(taskPromise);
+  }
+
+  async tryComplete(): Promise<void> {}
+
+  uncompletedLeaves(): number[] {
+    return [];
+  }
+
+  publicPromise(): Promise<T> {
+    return this.taskPromise;
+  }
+
+  readonly [Symbol.toStringTag] = "RestateTaskPromise";
+}
+
 export class RestateSinglePromise<T> extends AbstractRestatePromise<T> {
   private state: PromiseState = PromiseState.NOT_COMPLETED;
   private completablePromise: CompletablePromise<T> = new CompletablePromise();

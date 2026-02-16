@@ -26,6 +26,10 @@
       "import": "./dist/fetch.js",
       "require": "./dist/fetch.cjs"
     },
+    "./internal": {
+      "import": "./dist/internal.js",
+      "require": "./dist/internal.cjs"
+    },
     "./lambda": {
       "import": "./dist/lambda.js",
       "require": "./dist/lambda.cjs"
@@ -75,6 +79,9 @@
       ],
       "node": [
         "./dist/node.d.ts"
+      ],
+      "internal": [
+        "./dist/internal.d.ts"
       ]
     }
   }

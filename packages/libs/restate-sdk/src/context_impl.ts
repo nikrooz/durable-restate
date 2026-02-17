@@ -432,7 +432,7 @@ export class ContextImpl implements ObjectContext, WorkflowContext {
       nameOrAction,
       actionSecondParameter
     );
-    const serde = options?.serde ?? this.defaultSerde;
+    const serde = (options?.serde ?? this.defaultSerde) as Serde<T>;
 
     // Prepare the handle
     let handle: number;
@@ -597,7 +597,7 @@ export class ContextImpl implements ObjectContext, WorkflowContext {
       const notification = this.coreVm.take_notification(runPromise.handle);
       if (typeof notification === "object" && "Success" in notification) {
         // Sync replay path intentionally skips journal codec decode.
-        const value = serde.deserialize(notification.Success);
+        const value = serde.deserialize(notification.Success) as T;
         return {
           replayed: true,
           value,
@@ -617,7 +617,7 @@ export class ContextImpl implements ObjectContext, WorkflowContext {
     if (!(runPromise instanceof RestateSinglePromise)) {
       return {
         replayed: false,
-        flush: runPromise.then((value) => value),
+        flush: runPromise,
         commitSuccess: () => {},
         commitFailure: () => {},
       };
@@ -625,7 +625,7 @@ export class ContextImpl implements ObjectContext, WorkflowContext {
 
     return {
       replayed: false,
-      flush: runPromise.then((value) => value),
+      flush: runPromise,
       commitSuccess: (value: T) => completion.resolve(value),
       commitFailure: (error: unknown) => completion.reject(error),
     };

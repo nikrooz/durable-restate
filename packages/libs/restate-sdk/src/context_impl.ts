@@ -432,7 +432,7 @@ export class ContextImpl implements ObjectContext, WorkflowContext {
       nameOrAction,
       actionSecondParameter
     );
-    const serde = options?.serde ?? this.defaultSerde;
+    const serde = (options?.serde ?? this.defaultSerde) as Serde<T>;
 
     // Prepare the handle
     let handle: number;
@@ -558,6 +558,77 @@ export class ContextImpl implements ObjectContext, WorkflowContext {
         Failure
       )
     );
+  }
+
+  /**
+   * Internal bridge for proxy-based deterministic sync methods.
+   *
+   * Notes:
+   * - Journal semantics are still regular `Run` entries.
+   * - Replay extraction intentionally skips journal codec decode.
+   * TODO: this assumes the default identity journal codec. Add explicit support
+   * for custom journal codecs if needed.
+   */
+  public runSyncBridge<T>(
+    name: string,
+    options?: RunOptions<T>
+  ):
+    | {
+        replayed: true;
+        value: T;
+        flush: Promise<T>;
+        commitSuccess: (_value: T) => void;
+        commitFailure: (_error: unknown) => void;
+      }
+    | {
+        replayed: false;
+        flush: Promise<T>;
+        commitSuccess: (value: T) => void;
+        commitFailure: (error: unknown) => void;
+      } {
+    const serde = options?.serde ?? this.defaultSerde;
+    const completion = new CompletablePromise<T>();
+    const runPromise = this.run(name, () => completion.promise, options);
+
+    if (
+      runPromise instanceof RestateSinglePromise &&
+      this.coreVm.is_completed(runPromise.handle)
+    ) {
+      const notification = this.coreVm.take_notification(runPromise.handle);
+      if (typeof notification === "object" && "Success" in notification) {
+        // Sync replay path intentionally skips journal codec decode.
+        const value = serde.deserialize(notification.Success) as T;
+        return {
+          replayed: true,
+          value,
+          flush: Promise.resolve(value),
+          commitSuccess: () => {},
+          commitFailure: () => {},
+        };
+      }
+
+      if (typeof notification === "object" && "Failure" in notification) {
+        throw new TerminalError(notification.Failure.message, {
+          errorCode: notification.Failure.code,
+        });
+      }
+    }
+
+    if (!(runPromise instanceof RestateSinglePromise)) {
+      return {
+        replayed: false,
+        flush: runPromise,
+        commitSuccess: () => {},
+        commitFailure: () => {},
+      };
+    }
+
+    return {
+      replayed: false,
+      flush: runPromise,
+      commitSuccess: (value: T) => completion.resolve(value),
+      commitFailure: (error: unknown) => completion.reject(error),
+    };
   }
 
   public sleep(

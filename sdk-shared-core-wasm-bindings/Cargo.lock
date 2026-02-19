@@ -350,7 +350,7 @@ dependencies = [
 [[package]]
 name = "restate-sdk-shared-core"
 version = "0.7.1"
-source = "git+https://github.com/nikrooz/durable-sdk-shared-core.git?rev=f18d0962b8eec33e0e81b360ca6e9a0453c23605#f18d0962b8eec33e0e81b360ca6e9a0453c23605"
+source = "git+https://github.com/nikrooz/durable-sdk-shared-core.git?rev=1af53fd32b963ba2f05fc59cfef17aa2caddfe1f#1af53fd32b963ba2f05fc59cfef17aa2caddfe1f"
 dependencies = [
  "base64",
  "bs58",

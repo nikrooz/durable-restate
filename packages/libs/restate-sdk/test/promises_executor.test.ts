@@ -207,16 +207,27 @@ function createFixture(
   };
 }
 
-function replayMismatch(label: string): vm.WasmFailure {
+function replayMismatch(
+  label: string,
+  awaitingHandles?: number[]
+): vm.WasmFailure {
+  const metadata: vm.WasmFailureMetadata[] = [
+    {
+      key: "restate.error.kind",
+      value: "uncompleted_do_progress_during_replay",
+    },
+  ];
+  if (awaitingHandles !== undefined) {
+    metadata.push({
+      key: "restate.error.awaiting_handles",
+      value: awaitingHandles.join(","),
+    });
+  }
+
   return {
     code: 570,
     message: `${label}: 'do_progress' could not be replayed`,
-    metadata: [
-      {
-        key: "restate.error.kind",
-        value: "uncompleted_do_progress_during_replay",
-      },
-    ],
+    metadata,
   };
 }
 
@@ -255,6 +266,43 @@ async function toPromise<T>(promise: PromiseLike<T>): Promise<T> {
 }
 
 describe("PromisesExecutor native combinator replay behavior", () => {
+  it("fails only promises whose leaves intersect mismatch handles", async () => {
+    const mismatch = replayMismatch("scoped mismatch", [1]);
+    const fixture = createFixture((progress) => {
+      switch (progress.call) {
+        case 1:
+          expectHandles(progress.handles, [1, 2, 3]);
+          progress.resolve(2, "B");
+          return "AnyCompleted";
+        case 2:
+          expectHandles(progress.handles, [1, 3]);
+          throw mismatch;
+        case 3:
+          expectHandles(progress.handles, [3]);
+          progress.resolve(3, "C");
+          return "AnyCompleted";
+        default:
+          throw new Error(`unexpected call ${progress.call}`);
+      }
+    });
+
+    const a = fixture.promise<string>(1);
+    const b = fixture.promise<string>(2);
+    const c = fixture.promise<string>(3);
+
+    const cBranch = (async () => toPromise(c))();
+    const winner = await Promise.race([toPromise(a), toPromise(b)]);
+    expect(winner).toBe("B");
+
+    await expectRejectWithin(a.publicPromise(), mismatch);
+    await expect(cBranch).resolves.toBe("C");
+    expect(fixture.errorCallback).not.toHaveBeenCalled();
+    expect(fixture.coreVm.calls).toHaveLength(3);
+    expectHandles(fixture.coreVm.calls[0]!, [1, 2, 3]);
+    expectHandles(fixture.coreVm.calls[1]!, [1, 3]);
+    expectHandles(fixture.coreVm.calls[2]!, [3]);
+  });
+
   it("isolates detached loser mismatch for native Promise.race(toPromise)", async () => {
     const mismatch = replayMismatch("detached race loser");
     const fixture = createFixture((progress) => {
@@ -302,7 +350,11 @@ describe("PromisesExecutor native combinator replay behavior", () => {
     const b = fixture.promise<string>(2);
     const c = fixture.promise<string>(3);
 
-    const winner = await Promise.any([toPromise(a), toPromise(b), toPromise(c)]);
+    const winner = await Promise.any([
+      toPromise(a),
+      toPromise(b),
+      toPromise(c),
+    ]);
     expect(winner).toBe("C");
 
     await expectRejectWithin(a.publicPromise(), mismatch);
@@ -460,7 +512,10 @@ describe("PromisesExecutor native combinator replay behavior", () => {
     const a = fixture.promise<string>(1);
     const b = fixture.promise<string>(2);
 
-    await expectRejectWithin(Promise.race([toPromise(a), toPromise(b)]), retryable);
+    await expectRejectWithin(
+      Promise.race([toPromise(a), toPromise(b)]),
+      retryable
+    );
     await expectRejectWithin(b.publicPromise(), mismatch);
     expect(fixture.errorCallback).not.toHaveBeenCalled();
     expect(fixture.coreVm.calls).toStrictEqual([[1, 2], [2]]);
@@ -494,11 +549,7 @@ describe("PromisesExecutor native combinator replay behavior", () => {
     await expectRejectWithin(a.publicPromise(), mismatch);
     expect(fixture.inputPump.awaitNextProgress).toHaveBeenCalledTimes(1);
     expect(fixture.errorCallback).not.toHaveBeenCalled();
-    expect(fixture.coreVm.calls).toStrictEqual([
-      [1, 2],
-      [1, 2],
-      [1],
-    ]);
+    expect(fixture.coreVm.calls).toStrictEqual([[1, 2], [1, 2], [1]]);
   });
 
   it("handles ExecuteRun/WaitingPendingRun and still isolates detached losers", async () => {
@@ -532,15 +583,10 @@ describe("PromisesExecutor native combinator replay behavior", () => {
     await expectRejectWithin(a.publicPromise(), mismatch);
     expect(fixture.runClosuresTracker.executeRun).toHaveBeenCalledTimes(1);
     expect(fixture.runClosuresTracker.executeRun).toHaveBeenCalledWith(99);
-    expect(fixture.runClosuresTracker.awaitNextCompletedRun).toHaveBeenCalledTimes(
-      1
-    );
+    expect(
+      fixture.runClosuresTracker.awaitNextCompletedRun
+    ).toHaveBeenCalledTimes(1);
     expect(fixture.errorCallback).not.toHaveBeenCalled();
-    expect(fixture.coreVm.calls).toStrictEqual([
-      [1, 2],
-      [1, 2],
-      [1, 2],
-      [1],
-    ]);
+    expect(fixture.coreVm.calls).toStrictEqual([[1, 2], [1, 2], [1, 2], [1]]);
   });
 });

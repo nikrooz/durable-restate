@@ -12,7 +12,7 @@ default = ["console_error_panic_hook"]
 
 [dependencies]
 wasm-bindgen = "0.2.100"
-restate-sdk-shared-core = { git = "https://github.com/nikrooz/durable-sdk-shared-core.git", rev = "f18d0962b8eec33e0e81b360ca6e9a0453c23605", features = ["request_identity"] }
+restate-sdk-shared-core = { git = "https://github.com/nikrooz/durable-sdk-shared-core.git", rev = "1af53fd32b963ba2f05fc59cfef17aa2caddfe1f", features = ["request_identity"] }
 console_error_panic_hook = { version = "0.1.7", optional = true }
 serde = { version = "1.0.210", features = ["derive"] }
 serde-wasm-bindgen = "0.6.5"

@@ -440,6 +440,17 @@ export class PromisesExecutor {
       } catch (e) {
         const trackedPromises = Array.from(this.trackedPromises);
         if (isReplayAwaitMismatchError(e)) {
+          const replayAwaitingHandles = replayAwaitingHandlesFromError(e);
+          if (replayAwaitingHandles !== undefined) {
+            const affectedPromises = this.trackedPromisesIntersectingHandles(
+              trackedPromises,
+              replayAwaitingHandles
+            );
+            if (affectedPromises.length > 0) {
+              this.failTrackedPromises(affectedPromises, e);
+              continue;
+            }
+          }
           this.failTrackedPromises(trackedPromises, e);
           continue;
         }
@@ -507,6 +518,15 @@ export class PromisesExecutor {
     return handles;
   }
 
+  private trackedPromisesIntersectingHandles(
+    trackedPromises: Array<InternalRestatePromise<unknown>>,
+    handles: ReadonlySet<number>
+  ): Array<InternalRestatePromise<unknown>> {
+    return trackedPromises.filter((restatePromise) =>
+      restatePromise.uncompletedLeaves().some((handle) => handles.has(handle))
+    );
+  }
+
   private failTrackedPromises(
     trackedPromises: Array<InternalRestatePromise<unknown>>,
     reason: unknown
@@ -545,6 +565,7 @@ export class PromisesExecutor {
 const REPLAY_AWAIT_MISMATCH_ERROR_KIND =
   "uncompleted_do_progress_during_replay";
 const ERROR_KIND_METADATA_KEY = "restate.error.kind";
+const REPLAY_AWAITING_HANDLES_METADATA_KEY = "restate.error.awaiting_handles";
 
 function isReplayAwaitMismatchError(error: unknown): boolean {
   if (!isWasmFailure(error)) {
@@ -562,6 +583,37 @@ function isReplayAwaitMismatchError(error: unknown): boolean {
   }
 
   return error.message.includes("'do_progress' could not be replayed");
+}
+
+function replayAwaitingHandlesFromError(
+  error: unknown
+): Set<number> | undefined {
+  if (!isWasmFailure(error)) {
+    return undefined;
+  }
+
+  const rawHandles = error.metadata.find(
+    (entry) => entry.key === REPLAY_AWAITING_HANDLES_METADATA_KEY
+  )?.value;
+  if (rawHandles === undefined || rawHandles.length === 0) {
+    return undefined;
+  }
+
+  const handles = new Set<number>();
+  for (const token of rawHandles.split(",")) {
+    const trimmed = token.trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+
+    const handle = Number(trimmed);
+    if (!Number.isInteger(handle) || handle < 0 || handle > 0xffff_ffff) {
+      return undefined;
+    }
+    handles.add(handle);
+  }
+
+  return handles.size > 0 ? handles : undefined;
 }
 
 function isWasmFailure(error: unknown): error is vm.WasmFailure {

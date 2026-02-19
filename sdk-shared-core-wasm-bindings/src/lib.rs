@@ -268,13 +268,22 @@ pub struct WasmFailure {
     pub metadata: Vec<WasmFailureMetadata>,
 }
 
+const ERROR_KIND_METADATA_KEY: &str = "restate.error.kind";
+const REPLAY_AWAITING_HANDLES_METADATA_KEY: &str = "restate.error.awaiting_handles";
+
 impl From<Error> for WasmFailure {
     fn from(value: Error) -> Self {
         let mut metadata = Vec::new();
         if let Some(kind) = value.kind() {
             metadata.push(WasmFailureMetadata {
-                key: "restate.error.kind".to_string(),
+                key: ERROR_KIND_METADATA_KEY.to_string(),
                 value: kind.to_string(),
+            });
+        }
+        if let Some(handles) = value.replay_awaiting_handles() {
+            metadata.push(WasmFailureMetadata {
+                key: REPLAY_AWAITING_HANDLES_METADATA_KEY.to_string(),
+                value: handles.to_string(),
             });
         }
 

@@ -270,10 +270,18 @@ pub struct WasmFailure {
 
 impl From<Error> for WasmFailure {
     fn from(value: Error) -> Self {
+        let mut metadata = Vec::new();
+        if let Some(kind) = value.kind() {
+            metadata.push(WasmFailureMetadata {
+                key: "restate.error.kind".to_string(),
+                value: kind.to_string(),
+            });
+        }
+
         WasmFailure {
             code: value.code(),
             message: value.to_string(),
-            metadata: vec![],
+            metadata,
         }
     }
 }

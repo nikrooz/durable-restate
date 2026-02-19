@@ -24,9 +24,11 @@ class ManualPromise implements InternalRestatePromise<string> {
   [RESTATE_CTX_SYMBOL] = {} as any;
 
   private readonly resultPromise = new CompletablePromise<string>();
+  private pollingPromise?: Promise<void>;
   private completed = false;
 
   constructor(
+    private readonly executor: PromisesExecutor,
     private readonly handle: number,
     private readonly value: string,
     private readonly completedHandles: Set<number>
@@ -42,6 +44,7 @@ class ManualPromise implements InternalRestatePromise<string> {
       | undefined
       | null
   ): Promise<TResult1 | TResult2> {
+    this.ensurePolling();
     return this.publicPromise().then(onfulfilled, onrejected);
   }
 
@@ -51,10 +54,12 @@ class ManualPromise implements InternalRestatePromise<string> {
       | undefined
       | null
   ): Promise<string | TResult> {
+    this.ensurePolling();
     return this.publicPromise().catch(onrejected);
   }
 
   finally(onfinally?: (() => void) | undefined | null): Promise<string> {
+    this.ensurePolling();
     return this.publicPromise().finally(onfinally);
   }
 
@@ -98,6 +103,17 @@ class ManualPromise implements InternalRestatePromise<string> {
     return this.resultPromise.promise;
   }
 
+  private ensurePolling(): void {
+    if (this.pollingPromise !== undefined) {
+      return;
+    }
+
+    const progressPromise = this.executor.doProgress(this).catch(() => {});
+    this.pollingPromise = progressPromise.finally(() => {
+      this.pollingPromise = undefined;
+    });
+  }
+
   readonly [Symbol.toStringTag] = "ManualPromise";
 }
 
@@ -129,6 +145,7 @@ describe("PromisesExecutor", () => {
       },
     } as unknown as vm.WasmVM;
 
+    const errorCallback = vi.fn();
     const executor = new PromisesExecutor(
       coreVm,
       {
@@ -143,20 +160,21 @@ describe("PromisesExecutor", () => {
           throw new Error("unexpected executeRun");
         },
       } as unknown as RunClosuresTracker,
-      vi.fn()
+      errorCallback
     );
 
-    const a = new ManualPromise(1, "A", completedHandles);
-    const b = new ManualPromise(2, "B", completedHandles);
+    const a = new ManualPromise(executor, 1, "A", completedHandles);
+    const b = new ManualPromise(executor, 2, "B", completedHandles);
 
-    const progressA = executor.doProgress(a);
-    const progressB = executor.doProgress(b);
-
-    const winner = await Promise.race([a.publicPromise(), b.publicPromise()]);
+    const winner = await Promise.race([toPromise(a), toPromise(b)]);
     expect(winner).toBe("B");
 
-    await Promise.all([progressA, progressB]);
     await expect(a.publicPromise()).rejects.toEqual(replayMismatch);
+    expect(errorCallback).not.toHaveBeenCalled();
     expect(doProgressCalls).toStrictEqual([[1, 2], [1]]);
   });
 });
+
+async function toPromise<T>(promise: PromiseLike<T>): Promise<T> {
+  return await promise;
+}

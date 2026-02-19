@@ -49,6 +49,7 @@ export interface InternalRestatePromise<T> extends RestatePromise<T> {
   [RESTATE_CTX_SYMBOL]: ContextImpl;
 
   tryCancel(): void;
+  tryDetach(): void;
   tryFail(error: unknown): void;
   tryComplete(): Promise<void>;
   uncompletedLeaves(): Array<number>;
@@ -63,8 +64,116 @@ export type AsyncResultValue =
   | { InvocationId: string };
 
 export function extractContext(n: any): ContextImpl | undefined {
+  if (
+    n === null ||
+    n === undefined ||
+    (typeof n !== "object" && typeof n !== "function")
+  ) {
+    return undefined;
+  }
   // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
   return n[RESTATE_CTX_SYMBOL] as ContextImpl | undefined;
+}
+
+const LINKED_NATIVE_PROMISES = new WeakMap<
+  object,
+  InternalRestatePromise<unknown>
+>();
+
+export interface NativeCombinatorScope {
+  detachPending(): void;
+}
+
+/**
+ * Create a scope used by external Promise combinator patchers.
+ * The patcher should call `detachPending()` when the patched native combinator settles.
+ */
+export function createNativeCombinatorScope(
+  inputs: Iterable<unknown>
+): NativeCombinatorScope {
+  const snapshot = Array.from(inputs);
+  return {
+    detachPending() {
+      detachPendingNativeCombinatorInputs(snapshot);
+    },
+  };
+}
+
+/**
+ * Links a native promise to a Restate promise source, so an external combinator patcher
+ * can detach unresolved losers even when native promises were wrapped/converted.
+ */
+export function linkNativePromiseToRestatePromise<T>(
+  nativePromise: PromiseLike<T>,
+  sourcePromise: PromiseLike<unknown>
+): PromiseLike<T> {
+  const source = asInternalRestatePromise(sourcePromise);
+  if (source === undefined) {
+    return nativePromise;
+  }
+  if (
+    nativePromise !== null &&
+    nativePromise !== undefined &&
+    (typeof nativePromise === "object" || typeof nativePromise === "function")
+  ) {
+    LINKED_NATIVE_PROMISES.set(nativePromise as object, source);
+  }
+  return nativePromise;
+}
+
+/**
+ * Convenience helper for converting to a native Promise while preserving a link
+ * back to the originating Restate promise.
+ */
+export function toTrackedNativePromise<T>(value: PromiseLike<T>): Promise<T> {
+  const nativePromise = Promise.resolve(value);
+  linkNativePromiseToRestatePromise(nativePromise, value);
+  return nativePromise;
+}
+
+/**
+ * Detaches unresolved Restate promises referenced by native combinator inputs.
+ * Intended to be invoked by an external native Promise combinator patch when
+ * the combinator settles.
+ */
+export function detachPendingNativeCombinatorInputs(
+  inputs: Iterable<unknown>
+): void {
+  const seen = new Set<InternalRestatePromise<unknown>>();
+  for (const input of inputs) {
+    const restatePromise = asInternalRestatePromise(input);
+    if (restatePromise === undefined || seen.has(restatePromise)) {
+      continue;
+    }
+    seen.add(restatePromise);
+    if (restatePromise.uncompletedLeaves().length === 0) {
+      continue;
+    }
+    restatePromise.tryDetach();
+  }
+}
+
+function asInternalRestatePromise(
+  value: unknown
+): InternalRestatePromise<unknown> | undefined {
+  if (
+    value === null ||
+    value === undefined ||
+    (typeof value !== "object" && typeof value !== "function")
+  ) {
+    return undefined;
+  }
+
+  const asObject = value as object;
+  const linked = LINKED_NATIVE_PROMISES.get(asObject);
+  if (linked !== undefined) {
+    return linked;
+  }
+
+  if (extractContext(value) === undefined) {
+    return undefined;
+  }
+  return value as InternalRestatePromise<unknown>;
 }
 
 abstract class AbstractRestatePromise<T> implements InternalRestatePromise<T> {
@@ -147,6 +256,10 @@ abstract class AbstractRestatePromise<T> implements InternalRestatePromise<T> {
 
   tryCancel() {
     this.cancelPromise.reject(new CancelledError());
+  }
+
+  tryDetach() {
+    this[RESTATE_CTX_SYMBOL].promisesExecutor.detachPromise(this);
   }
 
   tryFail(error: unknown) {
@@ -294,6 +407,7 @@ export class RestatePendingPromise<T> implements InternalRestatePromise<T> {
   }
 
   tryCancel(): void {}
+  tryDetach(): void {}
   tryFail(): void {}
   async tryComplete(): Promise<void> {}
   uncompletedLeaves(): number[] {
@@ -403,6 +517,13 @@ export class PromisesExecutor {
     return this.progressWaiters.get(restatePromise)!.promise;
   }
 
+  detachPromise(restatePromise: InternalRestatePromise<unknown>) {
+    if (!this.progressWaiters.has(restatePromise)) {
+      return;
+    }
+    this.stopTrackingPromise(restatePromise);
+  }
+
   private ensureProgressLoop(): void {
     if (this.progressLoop !== undefined) {
       return;
@@ -454,6 +575,10 @@ export class PromisesExecutor {
           this.failTrackedPromises(trackedPromises, e);
           continue;
         }
+        if (isClosedAwaitError(e)) {
+          this.failTrackedPromises(trackedPromises, e);
+          return;
+        }
 
         this.errorCallback(e);
         this.failTrackedPromises(trackedPromises, e);
@@ -485,6 +610,10 @@ export class PromisesExecutor {
       try {
         await restatePromise.tryComplete();
       } catch (e) {
+        if (isClosedAwaitError(e)) {
+          this.failTrackedPromises(Array.from(this.trackedPromises), e);
+          return false;
+        }
         this.errorCallback(e);
         this.failTrackedPromises(Array.from(this.trackedPromises), e);
         return false;
@@ -566,6 +695,8 @@ const REPLAY_AWAIT_MISMATCH_ERROR_KIND =
   "uncompleted_do_progress_during_replay";
 const ERROR_KIND_METADATA_KEY = "restate.error.kind";
 const REPLAY_AWAITING_HANDLES_METADATA_KEY = "restate.error.awaiting_handles";
+const CLOSED_AWAIT_ERROR_CODE = 598;
+const CLOSED_AWAIT_ERROR_REGEX = /state machine was closed/i;
 
 function isReplayAwaitMismatchError(error: unknown): boolean {
   if (!isWasmFailure(error)) {
@@ -585,6 +716,58 @@ function isReplayAwaitMismatchError(error: unknown): boolean {
   return error.message.includes("'do_progress' could not be replayed");
 }
 
+function isClosedAwaitError(error: unknown): boolean {
+  const visited = new Set<unknown>();
+  let current: unknown = error;
+
+  while (
+    current !== null &&
+    typeof current === "object" &&
+    !visited.has(current)
+  ) {
+    if (isClosedAwaitErrorShallow(current)) {
+      return true;
+    }
+    visited.add(current);
+
+    const cause = (current as { cause?: unknown }).cause;
+    if (cause === undefined) {
+      return false;
+    }
+    current = cause;
+  }
+
+  return isClosedAwaitErrorShallow(current);
+}
+
+function isClosedAwaitErrorShallow(error: unknown): boolean {
+  if (isWasmFailure(error)) {
+    return (
+      error.code === CLOSED_AWAIT_ERROR_CODE &&
+      CLOSED_AWAIT_ERROR_REGEX.test(error.message)
+    );
+  }
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const candidate = error as Partial<{ code: unknown; message: unknown }>;
+  const candidateCode =
+    typeof candidate.code === "number"
+      ? candidate.code
+      : typeof candidate.code === "string"
+        ? Number(candidate.code)
+        : typeof candidate.code === "bigint"
+          ? Number(candidate.code)
+          : Number.NaN;
+
+  return (
+    Number.isInteger(candidateCode) &&
+    candidateCode === CLOSED_AWAIT_ERROR_CODE &&
+    typeof candidate.message === "string" &&
+    CLOSED_AWAIT_ERROR_REGEX.test(candidate.message)
+  );
+}
 function replayAwaitingHandlesFromError(
   error: unknown
 ): Set<number> | undefined {

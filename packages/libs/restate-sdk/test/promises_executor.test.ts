@@ -18,13 +18,7 @@ import type { InputPump, OutputPump } from "../src/io.js";
 import type { RunClosuresTracker } from "../src/context_impl.js";
 import type * as vm from "../src/endpoint/handlers/vm/sdk_shared_core_wasm_bindings.js";
 import type { InternalRestatePromise } from "../src/promises.js";
-import {
-  PromisesExecutor,
-  RESTATE_CTX_SYMBOL,
-  createNativeCombinatorScope,
-  linkNativePromiseToRestatePromise,
-  toTrackedNativePromise,
-} from "../src/promises.js";
+import { PromisesExecutor, RESTATE_CTX_SYMBOL } from "../src/promises.js";
 import { RetryableError, TerminalError } from "../src/types/errors.js";
 import { CompletablePromise } from "../src/utils/completable_promise.js";
 
@@ -128,10 +122,6 @@ class ManualPromise<T> implements InternalRestatePromise<T> {
       this.completed = true;
       this.resultPromise.reject(new Error("cancelled"));
     }
-  }
-
-  tryDetach(): void {
-    this.executor.detachPromise(this);
   }
 
   tryFail(error: unknown): void {
@@ -241,69 +231,6 @@ function replayMismatch(
   };
 }
 
-function replayMismatchWithAwaitingHandles(
-  label: string,
-  awaitingHandles: number[]
-): vm.WasmFailure {
-  return {
-    ...replayMismatch(label),
-    metadata: [
-      ...replayMismatch(label).metadata,
-      {
-        key: "restate.error.awaiting_handles",
-        value: awaitingHandles.join(","),
-      },
-    ],
-  };
-}
-
-function replayMismatchWithRawAwaitingHandles(
-  label: string,
-  awaitingHandles: string
-): vm.WasmFailure {
-  return {
-    ...replayMismatch(label),
-    metadata: [
-      ...replayMismatch(label).metadata,
-      {
-        key: "restate.error.awaiting_handles",
-        value: awaitingHandles,
-      },
-    ],
-  };
-}
-
-function closedAwaitError(label: string): vm.WasmFailure {
-  return {
-    code: 598,
-    message: `${label}: State machine was closed when invoking 'await'`,
-    metadata: [],
-  };
-}
-
-function closedAwaitLikeError(label: string): { code: number; message: string } {
-  return {
-    code: 598,
-    message: `${label}: State machine was closed when invoking 'await'`,
-  };
-}
-
-function closedAwaitLikeErrorStringCode(label: string): {
-  code: string;
-  message: string;
-} {
-  return {
-    code: "598",
-    message: `${label}: State machine was closed when invoking 'await'`,
-  };
-}
-
-function wrappedClosedAwaitError(label: string): { cause: { code: number; message: string } } {
-  return {
-    cause: closedAwaitLikeError(label),
-  };
-}
-
 function expectHandles(actual: number[], expected: number[]) {
   const as = [...actual].sort((a, b) => a - b);
   const es = [...expected].sort((a, b) => a - b);
@@ -376,64 +303,6 @@ describe("PromisesExecutor native combinator replay behavior", () => {
     expectHandles(fixture.coreVm.calls[2]!, [3]);
   });
 
-  it("scopes replay mismatch failure to promises intersecting awaiting handles", async () => {
-    const mismatch = replayMismatchWithAwaitingHandles("scoped mismatch", [1]);
-    const fixture = createFixture((progress) => {
-      switch (progress.call) {
-        case 1:
-          expectHandles(progress.handles, [1, 2]);
-          throw mismatch;
-        case 2:
-          expectHandles(progress.handles, [2]);
-          progress.resolve(2, "B");
-          return "AnyCompleted";
-        default:
-          throw new Error(`unexpected call ${progress.call}`);
-      }
-    });
-
-    const a = fixture.promise<string>(1);
-    const b = fixture.promise<string>(2);
-
-    const loser = toPromise(a).then(
-      () => {
-        throw new Error("expected loser to reject");
-      },
-      (error) => error
-    );
-    const winner = toPromise(b);
-
-    await expect(winner).resolves.toBe("B");
-    await expect(loser).resolves.toEqual(mismatch);
-    expect(fixture.errorCallback).not.toHaveBeenCalled();
-    expect(fixture.coreVm.calls).toStrictEqual([[1, 2], [2]]);
-  });
-
-  it("falls back to broad replay mismatch failure on malformed awaiting-handle metadata", async () => {
-    const mismatch = replayMismatchWithRawAwaitingHandles(
-      "malformed awaiting handles",
-      "1,not-a-handle"
-    );
-    const fixture = createFixture((progress) => {
-      if (progress.call !== 1) {
-        throw new Error(`unexpected call ${progress.call}`);
-      }
-      expectHandles(progress.handles, [1, 2]);
-      throw mismatch;
-    });
-
-    const a = fixture.promise<string>(1);
-    const b = fixture.promise<string>(2);
-
-    const first = toPromise(a);
-    const second = toPromise(b);
-
-    await expect(first).rejects.toEqual(mismatch);
-    await expect(second).rejects.toEqual(mismatch);
-    expect(fixture.errorCallback).not.toHaveBeenCalled();
-    expect(fixture.coreVm.calls).toStrictEqual([[1, 2]]);
-  });
-
   it("isolates detached loser mismatch for native Promise.race(toPromise)", async () => {
     const mismatch = replayMismatch("detached race loser");
     const fixture = createFixture((progress) => {
@@ -457,114 +326,6 @@ describe("PromisesExecutor native combinator replay behavior", () => {
     expect(winner).toBe("B");
 
     await expectRejectWithin(a.publicPromise(), mismatch);
-    expect(fixture.errorCallback).not.toHaveBeenCalled();
-    expect(fixture.coreVm.calls).toStrictEqual([[1, 2], [1]]);
-  });
-
-  it("silences closed-await errors from lingering native-combinator losers", async () => {
-    const closed = closedAwaitError("closed vm");
-    const fixture = createFixture((progress) => {
-      switch (progress.call) {
-        case 1:
-          expectHandles(progress.handles, [1, 2]);
-          progress.resolve(2, "B");
-          return "AnyCompleted";
-        case 2:
-          expectHandles(progress.handles, [1]);
-          throw closed;
-        default:
-          throw new Error(`unexpected call ${progress.call}`);
-      }
-    });
-
-    const a = fixture.promise<string>(1);
-    const b = fixture.promise<string>(2);
-
-    const winner = await Promise.race([toPromise(a), toPromise(b)]);
-    expect(winner).toBe("B");
-
-    await expectRejectWithin(a.publicPromise(), closed);
-    expect(fixture.errorCallback).not.toHaveBeenCalled();
-    expect(fixture.coreVm.calls).toStrictEqual([[1, 2], [1]]);
-  });
-
-  it("silences closed-await errors even when surfaced as non-wasm failure objects", async () => {
-    const closed = closedAwaitLikeError("closed vm");
-    const fixture = createFixture((progress) => {
-      switch (progress.call) {
-        case 1:
-          expectHandles(progress.handles, [1, 2]);
-          progress.resolve(2, "B");
-          return "AnyCompleted";
-        case 2:
-          expectHandles(progress.handles, [1]);
-          throw closed;
-        default:
-          throw new Error(`unexpected call ${progress.call}`);
-      }
-    });
-
-    const a = fixture.promise<string>(1);
-    const b = fixture.promise<string>(2);
-
-    const winner = await Promise.race([toPromise(a), toPromise(b)]);
-    expect(winner).toBe("B");
-
-    await expectRejectWithin(a.publicPromise(), closed);
-    expect(fixture.errorCallback).not.toHaveBeenCalled();
-    expect(fixture.coreVm.calls).toStrictEqual([[1, 2], [1]]);
-  });
-
-  it("silences closed-await errors when code is surfaced as a string", async () => {
-    const closed = closedAwaitLikeErrorStringCode("closed vm");
-    const fixture = createFixture((progress) => {
-      switch (progress.call) {
-        case 1:
-          expectHandles(progress.handles, [1, 2]);
-          progress.resolve(2, "B");
-          return "AnyCompleted";
-        case 2:
-          expectHandles(progress.handles, [1]);
-          throw closed;
-        default:
-          throw new Error(`unexpected call ${progress.call}`);
-      }
-    });
-
-    const a = fixture.promise<string>(1);
-    const b = fixture.promise<string>(2);
-
-    const winner = await Promise.race([toPromise(a), toPromise(b)]);
-    expect(winner).toBe("B");
-
-    await expectRejectWithin(a.publicPromise(), closed);
-    expect(fixture.errorCallback).not.toHaveBeenCalled();
-    expect(fixture.coreVm.calls).toStrictEqual([[1, 2], [1]]);
-  });
-
-  it("silences closed-await errors wrapped in a cause object", async () => {
-    const closed = wrappedClosedAwaitError("closed vm");
-    const fixture = createFixture((progress) => {
-      switch (progress.call) {
-        case 1:
-          expectHandles(progress.handles, [1, 2]);
-          progress.resolve(2, "B");
-          return "AnyCompleted";
-        case 2:
-          expectHandles(progress.handles, [1]);
-          throw closed;
-        default:
-          throw new Error(`unexpected call ${progress.call}`);
-      }
-    });
-
-    const a = fixture.promise<string>(1);
-    const b = fixture.promise<string>(2);
-
-    const winner = await Promise.race([toPromise(a), toPromise(b)]);
-    expect(winner).toBe("B");
-
-    await expectRejectWithin(a.publicPromise(), closed);
     expect(fixture.errorCallback).not.toHaveBeenCalled();
     expect(fixture.coreVm.calls).toStrictEqual([[1, 2], [1]]);
   });
@@ -827,135 +588,5 @@ describe("PromisesExecutor native combinator replay behavior", () => {
     ).toHaveBeenCalledTimes(1);
     expect(fixture.errorCallback).not.toHaveBeenCalled();
     expect(fixture.coreVm.calls).toStrictEqual([[1, 2], [1, 2], [1, 2], [1]]);
-  });
-
-  it("supports external native-combinator scope detaching unresolved losers", async () => {
-    const fixture = createFixture((progress) => {
-      switch (progress.call) {
-        case 1:
-          expectHandles(progress.handles, [1, 2]);
-          progress.resolve(2, "B");
-          return "AnyCompleted";
-        case 2:
-          throw replayMismatch("loser should have been detached");
-        default:
-          throw new Error(`unexpected call ${progress.call}`);
-      }
-    });
-
-    const a = fixture.promise<string>(1);
-    const b = fixture.promise<string>(2);
-
-    const nativeA = linkNativePromiseToRestatePromise(toPromise(a), a);
-    const nativeB = linkNativePromiseToRestatePromise(toPromise(b), b);
-    const scope = createNativeCombinatorScope([nativeA, nativeB]);
-
-    const winner = await Promise.race([nativeA, nativeB]);
-    expect(winner).toBe("B");
-
-    scope.detachPending();
-    await delay(25);
-
-    expect(fixture.coreVm.calls).toStrictEqual([[1, 2]]);
-    expect(fixture.errorCallback).not.toHaveBeenCalled();
-  });
-
-  it("supports toTrackedNativePromise for detached-loser cleanup", async () => {
-    const fixture = createFixture((progress) => {
-      switch (progress.call) {
-        case 1:
-          expectHandles(progress.handles, [10, 20]);
-          progress.resolve(20, "B");
-          return "AnyCompleted";
-        case 2:
-          throw replayMismatch("tracked native loser should have been detached");
-        default:
-          throw new Error(`unexpected call ${progress.call}`);
-      }
-    });
-
-    const a = fixture.promise<string>(10);
-    const b = fixture.promise<string>(20);
-
-    const nativeA = toTrackedNativePromise(a);
-    const nativeB = toTrackedNativePromise(b);
-    const scope = createNativeCombinatorScope([nativeA, nativeB]);
-
-    const winner = await Promise.race([nativeA, nativeB]);
-    expect(winner).toBe("B");
-
-    scope.detachPending();
-    await delay(25);
-
-    expect(fixture.coreVm.calls).toStrictEqual([[10, 20]]);
-    expect(fixture.errorCallback).not.toHaveBeenCalled();
-  });
-
-  it("supports external native-combinator scope detaching losers for Promise.any", async () => {
-    const fixture = createFixture((progress) => {
-      switch (progress.call) {
-        case 1:
-          expectHandles(progress.handles, [1, 2, 3]);
-          progress.resolve(3, "C");
-          return "AnyCompleted";
-        case 2:
-          throw replayMismatch("any losers should have been detached");
-        default:
-          throw new Error(`unexpected call ${progress.call}`);
-      }
-    });
-
-    const a = fixture.promise<string>(1);
-    const b = fixture.promise<string>(2);
-    const c = fixture.promise<string>(3);
-
-    const nativeA = toTrackedNativePromise(a);
-    const nativeB = toTrackedNativePromise(b);
-    const nativeC = toTrackedNativePromise(c);
-    const scope = createNativeCombinatorScope([nativeA, nativeB, nativeC]);
-
-    const winner = await Promise.any([nativeA, nativeB, nativeC]);
-    expect(winner).toBe("C");
-
-    scope.detachPending();
-    await delay(25);
-
-    expect(fixture.coreVm.calls).toStrictEqual([[1, 2, 3]]);
-    expect(fixture.errorCallback).not.toHaveBeenCalled();
-  });
-
-  it("supports external native-combinator scope detaching losers for Promise.all fast-fail", async () => {
-    const terminal = new TerminalError("boom");
-    const fixture = createFixture((progress) => {
-      switch (progress.call) {
-        case 1:
-          expectHandles(progress.handles, [11, 12, 13]);
-          progress.reject(12, terminal);
-          return "AnyCompleted";
-        case 2:
-          throw replayMismatch("all fast-fail losers should have been detached");
-        default:
-          throw new Error(`unexpected call ${progress.call}`);
-      }
-    });
-
-    const a = fixture.promise<string>(11);
-    const b = fixture.promise<string>(12);
-    const c = fixture.promise<string>(13);
-
-    const nativeA = toTrackedNativePromise(a);
-    const nativeB = toTrackedNativePromise(b);
-    const nativeC = toTrackedNativePromise(c);
-    const scope = createNativeCombinatorScope([nativeA, nativeB, nativeC]);
-
-    await expect(Promise.all([nativeA, nativeB, nativeC])).rejects.toEqual(
-      terminal
-    );
-
-    scope.detachPending();
-    await delay(25);
-
-    expect(fixture.coreVm.calls).toStrictEqual([[11, 12, 13]]);
-    expect(fixture.errorCallback).not.toHaveBeenCalled();
   });
 });

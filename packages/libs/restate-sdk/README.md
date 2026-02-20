@@ -48,10 +48,6 @@ npx -y @restatedev/create-app@latest
 
 Check the [Quickstart](https://docs.restate.dev/get_started/quickstart) for more info.
 
-### Native Promise combinators
-
-If you patch native Promise combinators (`race`/`any`/`all`/`allSettled`) for Restate promises, use the SDK integration APIs documented in [NATIVE_PROMISE_PATCHING.md](./NATIVE_PROMISE_PATCHING.md).
-
 ## Versions
 
 This library follows [Semantic Versioning](https://semver.org/).

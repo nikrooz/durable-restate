@@ -10,13 +10,6 @@
  */
 
 import { RestatePromise } from "./context.js";
-export type { NativeCombinatorScope } from "./promises.js";
-export {
-  createNativeCombinatorScope,
-  detachPendingNativeCombinatorInputs,
-  linkNativePromiseToRestatePromise,
-  toTrackedNativePromise,
-} from "./promises.js";
 
 export type {
   Context,
